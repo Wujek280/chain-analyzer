@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import textwrap
+import wave
 from glob import glob
 from datetime import datetime
 
@@ -22,12 +23,24 @@ ENV_SCAN_DIR = os.environ.get("CHAIN_SCAN_DIR", "").strip()
 THRESHOLD_HIGH = float(os.environ.get("CHAIN_THRESH_HIGH", "0.08"))
 CHUNK_MS = int(os.environ.get("CHAIN_CHUNK_MS", "5"))
 DEFAULT_LIMIT = int(os.environ.get("CHAIN_LIST_LIMIT", "6"))
-ENV_NORMALIZE = os.environ.get("CHAIN_NORMALIZE", "").strip().lower() in {"0", "false", "no", "off"}
-DEFAULT_BAND_CENTER = int(os.environ.get("CHAIN_BAND_CENTER", "3900"))
+ENV_NORMALIZE = os.environ.get("CHAIN_NORMALIZE", "").strip().lower() in {"false", "no", "off"}
+DEFAULT_BAND_CENTER = int(os.environ.get("CHAIN_BAND_CENTER", "4000"))
 DEFAULT_BAND_RANGE = int(os.environ.get("CHAIN_BAND_RANGE", "200"))
 MIN_PEAK_DISTANCE_MS = int(os.environ.get("CHAIN_MIN_PEAK_DISTANCE_MS", "8"))
+PHASE_OFFSETS_MS = tuple(
+    sorted(
+        {
+            max(0, int(part.strip()))
+            for part in os.environ.get("CHAIN_PHASE_OFFSETS_MS", "0,2,4").split(",")
+            if part.strip()
+        }
+    )
+)
+if not PHASE_OFFSETS_MS:
+    PHASE_OFFSETS_MS = (0, 2, 4)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LAST_AUDIO_PATH = os.path.join(SCRIPT_DIR, "last.wav")
+LAST_SYNTHETIC_PATH = os.path.join(SCRIPT_DIR, "last-synthetic.wav")
 CSV_PATH = os.path.join(SCRIPT_DIR, "results.csv")
 
 
@@ -109,6 +122,40 @@ def extract_peak_times_ms(envelope, chunk_ms, threshold, min_distance_ms=MIN_PEA
     return [idx * chunk_ms for idx in peak_indices]
 
 
+def refine_peak_times_by_phase(peak_time_runs):
+    """Average peak timestamps across multiple phase-shifted runs."""
+    if not peak_time_runs:
+        return []
+
+    common_length = min(len(run) for run in peak_time_runs)
+    if common_length <= 0:
+        return []
+
+    refined = []
+    for idx in range(common_length):
+        samples = [run[idx] for run in peak_time_runs if idx < len(run)]
+        refined.append(round(sum(samples) / len(samples), 2))
+    return refined
+
+
+def render_interval_bars(intervals_ms, width=20):
+    """Render intervals as a normalized ASCII bar sequence."""
+    if not intervals_ms:
+        return []
+
+    min_interval = min(intervals_ms)
+    max_interval = max(intervals_ms)
+    if max_interval <= min_interval:
+        return ["[]" for _ in intervals_ms]
+
+    bars = []
+    for interval in intervals_ms:
+        normalized = (interval - min_interval) / (max_interval - min_interval)
+        count = max(1, int(round(normalized * width)))
+        bars.append("[]" * count)
+    return bars
+
+
 def compute_decline_coefficient(peak_times_ms):
     """Compute the average slowdown rate from consecutive peak intervals."""
     intervals_ms = [peak_times_ms[i] - peak_times_ms[i - 1] for i in range(1, len(peak_times_ms))]
@@ -160,12 +207,14 @@ def run_analysis(
     band_center=DEFAULT_BAND_CENTER,
     band_range=DEFAULT_BAND_RANGE,
     min_peak_distance_ms=MIN_PEAK_DISTANCE_MS,
+    start_offset_ms=0,
 ):
     """Run one pass of the audio analysis."""
     sample_rate = 16000
     bytes_per_sample = 2
     samples_per_chunk = max(1, int(sample_rate * (chunk_ms / 1000.0)))
     chunk_bytes = samples_per_chunk * bytes_per_sample
+    skip_bytes = max(0, int(sample_rate * (start_offset_ms / 1000.0))) * bytes_per_sample
 
     audio_filters = build_audio_filters(normalize=normalize, band_center=band_center, band_range=band_range)
 
@@ -183,6 +232,14 @@ def run_analysis(
     envelope = []
 
     try:
+        remaining_skip = skip_bytes
+        while remaining_skip > 0:
+            to_read = min(chunk_bytes, remaining_skip)
+            skipped = process.stdout.read(to_read)
+            if not skipped:
+                break
+            remaining_skip -= len(skipped)
+
         while True:
             raw_data = process.stdout.read(chunk_bytes)
             if not raw_data or len(raw_data) < chunk_bytes:
@@ -204,6 +261,8 @@ def run_analysis(
                 process.kill()
 
     peak_times_ms = extract_peak_times_ms(envelope, chunk_ms, thresh_high, min_distance_ms=min_peak_distance_ms)
+    if start_offset_ms:
+        peak_times_ms = [t + start_offset_ms for t in peak_times_ms]
     decline = compute_decline_coefficient(peak_times_ms)
 
     return {
@@ -238,11 +297,61 @@ def dump_processed_audio(video_path, normalize=False, band_center=DEFAULT_BAND_C
     subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
+def get_wav_duration_ms(path):
+    """Return WAV duration in milliseconds."""
+    with wave.open(path, "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate()
+        if rate <= 0:
+            return 0
+        return int((frames / float(rate)) * 1000)
+
+
+def build_sine_click(sample_rate, duration_ms, frequency_hz=4000, amplitude=0.85):
+    """Generate a short sine click as 16-bit PCM samples."""
+    sample_count = max(1, int(sample_rate * (duration_ms / 1000.0)))
+    samples = []
+    for i in range(sample_count):
+        value = amplitude * math.sin(2.0 * math.pi * frequency_hz * (i / sample_rate))
+        samples.append(int(max(-1.0, min(1.0, value)) * 32767))
+    return samples
+
+
+def dump_synthetic_audio(peak_times_ms, duration_ms):
+    """Write a debug WAV with short 4 kHz clicks at detected peak timestamps."""
+    sample_rate = 16000
+    click_duration_ms = 4
+    click_samples = build_sine_click(sample_rate, click_duration_ms)
+    click_offset_ms = click_duration_ms / 2.0
+    total_samples = max(1, int(sample_rate * (duration_ms / 1000.0)))
+    audio = [0] * total_samples
+
+    for peak_ms in peak_times_ms:
+        start_idx = int(sample_rate * (((peak_ms - click_offset_ms) / 1000.0)))
+        for offset, sample in enumerate(click_samples):
+            idx = start_idx + offset
+            if idx >= total_samples:
+                break
+            if idx < 0:
+                continue
+            mixed = audio[idx] + sample
+            audio[idx] = max(-32768, min(32767, mixed))
+
+    with wave.open(LAST_SYNTHETIC_PATH, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        pcm = struct.pack(f"<{len(audio)}h", *audio)
+        wav_file.writeframes(pcm)
+
+    print(f" -> Dumped synthetic debug audio to: {LAST_SYNTHETIC_PATH}")
+
+
 def save_result_row(coefficient):
     """Append a timestamp, description, and coefficient to the CSV log."""
     description = input("Enter short description for this run: ").strip()
     timestamp = datetime.now().isoformat(timespec="seconds")
-    row = [timestamp, description, "" if coefficient is None else f"{coefficient:.6f}"]
+    row = [timestamp, description, "" if coefficient is None else f"{coefficient:.2f}"]
 
     file_exists = os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as handle:
@@ -263,6 +372,7 @@ def analyze_audio_with_fallback(
     band_range=DEFAULT_BAND_RANGE,
     min_peak_distance_ms=MIN_PEAK_DISTANCE_MS,
     save=False,
+    debug=False,
 ):
     """Try the analysis with progressively lower thresholds."""
     print(f"\n[1/2] Analyzing: {os.path.basename(video_path)}")
@@ -281,38 +391,64 @@ def analyze_audio_with_fallback(
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f" -> Warning: could not dump processed audio to last.wav ({exc})")
 
-    attempts = [thresh_high, thresh_high * 0.5, thresh_high * 0.25]
+    attempts = [thresh_high, thresh_high * 0.25, thresh_high * 0.10]
 
     for idx, current_thresh in enumerate(attempts):
         if idx > 0:
             print(f" -> No stable peak chain detected. Retry {idx + 1} with threshold {current_thresh:.4f}")
 
-        result = run_analysis(
-            video_path,
-            chunk_ms,
-            current_thresh,
-            normalize=normalize,
-            band_center=band_center,
-            band_range=band_range,
-            min_peak_distance_ms=min_peak_distance_ms,
-        )
+        phase_runs = []
+        for phase_offset in PHASE_OFFSETS_MS:
+            phase_runs.append(
+                run_analysis(
+                    video_path,
+                    chunk_ms,
+                    current_thresh,
+                    normalize=normalize,
+                    band_center=band_center,
+                    band_range=band_range,
+                    min_peak_distance_ms=min_peak_distance_ms,
+                    start_offset_ms=phase_offset,
+                )["peak_times_ms"]
+            )
+
+        peak_times_ms = refine_peak_times_by_phase(phase_runs)
+        decline = compute_decline_coefficient(peak_times_ms)
+        result = {
+            "peak_count": len(peak_times_ms),
+            "peak_times_ms": peak_times_ms,
+            "intervals_ms": decline["intervals_ms"],
+            "trimmed_intervals_ms": decline["trimmed_intervals_ms"],
+            "rising_pairs": decline["rising_pairs"],
+            "decline_coefficient": decline["coefficient"],
+        }
 
         if result["decline_coefficient"] is not None and len(result["trimmed_intervals_ms"]) >= 2:
             print("[2/2] Success: peak decline detected.")
             print("-" * 40)
+            print(f"Phase offsets (ms): {list(PHASE_OFFSETS_MS)}")
             print(f"Detected peaks: {result['peak_count']}")
-            print(f"Peak times (ms): {result['peak_times_ms']}")
-            print(f"Intervals (ms): {result['trimmed_intervals_ms']}")
+            print(f"Peak times (ms): {[int(round(x)) for x in result['peak_times_ms']]}")
+            print(f"Intervals (ms): {[int(round(x)) for x in result['trimmed_intervals_ms']]}")
+            print("Interval bars:")
+            for interval, bar in zip(result["trimmed_intervals_ms"], render_interval_bars(result["trimmed_intervals_ms"])):
+                print(f"  {int(round(interval))} ms {bar}")
             print("Rising interval pairs:")
             for item in result["rising_pairs"]:
                 print(
-                    f"  pair {item['index'] + 1}: {item['prev_ms']} -> {item['current_ms']} ms "
-                    f"(slowdown {item['slowdown_rate']:.4f})"
+                    f"  pair {item['index'] + 1}: {int(round(item['prev_ms']))} -> {int(round(item['current_ms']))} ms "
+                    f"(slowdown {item['slowdown_rate']:.2f})"
                 )
-            print(f"Average slowdown coefficient: {result['decline_coefficient']:.4f}")
+            print(f"Average slowdown coefficient: {result['decline_coefficient']:.2f}")
             print("-" * 40)
             if save:
                 save_result_row(result["decline_coefficient"])
+            if debug:
+                try:
+                    duration_ms = get_wav_duration_ms(LAST_AUDIO_PATH)
+                    dump_synthetic_audio(result["peak_times_ms"], duration_ms)
+                except (OSError, wave.Error, struct.error) as exc:
+                    print(f" -> Warning: could not dump synthetic debug audio ({exc})")
             return
 
     print("[-] Could not detect a stable rising-interval pattern, even at higher sensitivity.")
@@ -357,6 +493,11 @@ def build_parser():
         help="Minimum spacing between detected peaks in milliseconds. Default: 8.",
     )
     parser.add_argument(
+        "--phase-offsets",
+        default="0,2,4",
+        help="Comma-separated chunk offsets in milliseconds used for timestamp averaging. Default: 0,2,4.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=DEFAULT_LIMIT,
@@ -372,6 +513,11 @@ def build_parser():
         "--save",
         action="store_true",
         help="Append the timestamp, description, and coefficient to results.csv next to the script.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write last-synthetic.wav with 4 kHz debug clicks at detected timestamps.",
     )
     parser.add_argument(
         "--normalize",
@@ -390,7 +536,7 @@ def build_parser():
         "--band",
         type=int,
         default=DEFAULT_BAND_CENTER,
-        help="Center frequency for the band-pass filter in Hz. Default: 3900.",
+        help="Center frequency for the band-pass filter in Hz. Default: 4000.",
     )
     parser.add_argument(
         "--range",
@@ -411,6 +557,18 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    global PHASE_OFFSETS_MS
+    PHASE_OFFSETS_MS = tuple(
+        sorted(
+            {
+                max(0, int(part.strip()))
+                for part in str(args.phase_offsets).split(",")
+                if part.strip()
+            }
+        )
+    )
+    if not PHASE_OFFSETS_MS:
+        PHASE_OFFSETS_MS = (0, 2, 4)
 
     print(f"Scanning {args.dir}...")
     videos = get_recent_videos(args.dir, args.limit)
@@ -447,6 +605,7 @@ def main():
         band_range=args.band_range,
         min_peak_distance_ms=args.min_peak_distance,
         save=args.save,
+        debug=args.debug,
     )
 
 if __name__ == "__main__":
