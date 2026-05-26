@@ -5,7 +5,6 @@ import signal
 import struct
 import subprocess
 import sys
-from datetime import datetime
 from glob import glob
 
 # --- CONFIGURATION & ENV VARIABLES ---
@@ -14,8 +13,10 @@ DEFAULT_DIRS = [
     os.path.expanduser("~/storage/shared/DCIM/Camera"),
     os.path.expanduser("~/storage/shared/Camera"),
 ]
+ENV_SCAN_DIR = os.environ.get("CHAIN_SCAN_DIR", "").strip()
 THRESHOLD_HIGH = float(os.environ.get("CHAIN_THRESH_HIGH", "0.08"))
 CHUNK_MS = int(os.environ.get("CHAIN_CHUNK_MS", "10"))
+DEFAULT_LIMIT = int(os.environ.get("CHAIN_LIST_LIMIT", "6"))
 
 
 def resolve_default_directory():
@@ -25,28 +26,17 @@ def resolve_default_directory():
     return DEFAULT_DIRS[0]
 
 
-def get_todays_videos(directory):
-    """Return today's MP4 videos, newest first."""
-    today = datetime.now().date()
+def get_videos(directory):
+    """Return all MP4 videos, newest first."""
     video_files = glob(os.path.join(directory, "*.mp4")) + glob(os.path.join(directory, "*.MP4"))
-
-    todays_files = []
-    for f in video_files:
-        try:
-            mtime = datetime.fromtimestamp(os.path.getmtime(f)).date()
-            if mtime == today:
-                todays_files.append(f)
-        except OSError:
-            continue
-    return sorted(todays_files, key=os.path.getmtime, reverse=True)
+    return sorted(video_files, key=os.path.getmtime, reverse=True)
 
 
-def get_latest_video(directory):
-    videos = get_todays_videos(directory)
-    if videos:
-        return videos[0]
-    video_files = glob(os.path.join(directory, "*.mp4")) + glob(os.path.join(directory, "*.MP4"))
-    return sorted(video_files, key=os.path.getmtime, reverse=True)[0] if video_files else None
+def get_recent_videos(directory, limit):
+    """Return the newest MP4 videos capped to a small menu."""
+    if limit < 1:
+        return []
+    return get_videos(directory)[:limit]
 
 
 def run_analysis(video_path, chunk_ms, thresh_high):
@@ -139,42 +129,31 @@ def analyze_audio_with_fallback(video_path, chunk_ms, thresh_high):
 
 def main():
     parser = argparse.ArgumentParser(description="Chain audio analyzer for Termux")
-    parser.add_argument("--dir", default=resolve_default_directory(), help="Folder with videos")
+    parser.add_argument("--dir", default=ENV_SCAN_DIR or resolve_default_directory(), help="Folder with videos")
     parser.add_argument("--high", type=float, default=THRESHOLD_HIGH, help="Click detection threshold")
     parser.add_argument("--chunk", type=int, default=CHUNK_MS, help="Window size in ms")
-    parser.add_argument("--latest", action="store_true", help="Analyze the newest video automatically")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="How many newest videos to show")
     args = parser.parse_args()
 
     print(f"Scanning {args.dir}...")
-    videos = get_todays_videos(args.dir)
+    videos = get_recent_videos(args.dir, args.limit)
 
     if not videos:
-        print(f"No videos found for today in: {args.dir}")
-        if args.latest:
-            latest = get_latest_video(args.dir)
-            if latest:
-                print(f"Falling back to newest video: {os.path.basename(latest)}")
-                analyze_audio_with_fallback(latest, args.chunk, args.high)
-                return
+        print(f"No videos found in: {args.dir}")
         sys.exit(0)
 
-    if args.latest:
-        selected_video = videos[0]
-        print(f"Auto-selected newest file: {os.path.basename(selected_video)}")
-    else:
-        print("\nToday's videos:")
-        for idx, v in enumerate(videos):
-            print(f"[{idx}] {os.path.basename(v)}")
+    print(f"\nNewest {len(videos)} videos:")
+    for idx, v in enumerate(videos, start=1):
+        print(f"[{idx}] {os.path.basename(v)}")
 
-        try:
-            selection = int(input("\nChoose a video number: "))
-            selected_video = videos[selection]
-        except (ValueError, IndexError):
-            print("Invalid selection.")
-            sys.exit(1)
+    try:
+        selection = int(input(f"\nChoose a video number (1-{len(videos)}): "))
+        selected_video = videos[selection - 1]
+    except (ValueError, IndexError):
+        print("Invalid selection.")
+        sys.exit(1)
 
     analyze_audio_with_fallback(selected_video, args.chunk, args.high)
 
 if __name__ == "__main__":
     main()
-
