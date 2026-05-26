@@ -55,10 +55,12 @@ fi
 
 if [ -d "$HOME/storage" ]; then
   log "Storage access already looks available."
-else
+elif [ -n "${TERMUX_VERSION:-}" ]; then
   warn "Termux storage is not mounted yet."
   warn "Run this once if you want the default Camera folder to work:"
   warn "  termux-setup-storage"
+else
+  log "Skipping Termux storage setup on this system."
 fi
 
 log "Checking project script syntax..."
@@ -75,4 +77,5 @@ log "  python analyzer_gemini.py --dir /path/to/videos"
 log ""
 log "You can also set an environment variable:"
 log "  export CHAIN_SCAN_DIR=/path/to/videos"
+log "  export CHAIN_NORMALIZE=1"
 log "  python analyzer_gemini.py"
