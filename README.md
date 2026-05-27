@@ -32,6 +32,8 @@ This installs `python`, `ffmpeg`, and Python dependencies.
 If you prefer manual install:
 
 ```bash
+git clone https://github.com/<your-username>/chain-analyzer.git
+cd chain-analyzer
 pkg update -y
 pkg install -y python ffmpeg
 python -m pip install --upgrade pip
