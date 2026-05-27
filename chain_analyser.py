@@ -491,13 +491,21 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
     print("[2/2] Results")
     print("=" * 50)
     print(f"Total peaks detected: {len(peak_times_ms)}")
-    print(f"Deceleration phase: {len(decel_peaks)} peaks "
-          f"({int(round(decel_peaks[0]))} ms to {int(round(decel_peaks[-1]))} ms)")
+    start_s = decel_peaks[0] / 1000.0
+    end_s = decel_peaks[-1] / 1000.0
+    print(f"{start_s:.1f} - {end_s:.1f}s ({len(decel_peaks)} peaks detected)")
     print(f"Peak times (ms): {[int(round(x)) for x in decel_peaks]}")
 
     print(f"\n--- Deceleration intervals ({len(decel_intervals)}) ---")
-    for interval, bar in zip(decel_intervals, render_interval_bars(decel_intervals)):
-        print(f"  {int(round(interval)):4d} ms {bar}")
+    bars = render_interval_bars(decel_intervals)
+    indexed_rows = []
+    for idx_from_end, src_idx in enumerate(range(len(decel_intervals) - 1, -1, -1)):
+        interval_ms = int(round(decel_intervals[src_idx]))
+        indexed_rows.append((f"n{idx_from_end}", interval_ms, bars[src_idx]))
+    label_width = max((len(label) for label, _, _ in indexed_rows), default=2)
+    ms_width = max((len(str(ms)) for _, ms, _ in indexed_rows), default=3)
+    for label, interval_ms, bar in indexed_rows:
+        print(f"  {label:<{label_width}}  {interval_ms:>{ms_width}} ms  {bar}")
 
     # Last 4 intervals — consistent metric regardless of total peak count
     # Shifted by -1 to drop the unstable final click: uses n-4..n-1 from the end.
@@ -507,12 +515,11 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
         last4 = decel_intervals[:-1]
     else:
         last4 = decel_intervals
-    coeff4, _stdev4 = compute_coefficient(last4)
     log_coeff4, log_r2 = compute_log_coefficient(last4)
 
     if log_coeff4 is not None:
-        print(f"\nK-value (last): {log_coeff4:.2f}")
-    if coeff4 is None and log_coeff4 is None:
+        print(f"\nK-value (last n1..n4): {log_coeff4:.2f} (R²={log_r2:.3f})")
+    if log_coeff4 is None:
         print("\n[-] Could not compute deceleration coefficient.")
     print("=" * 50)
 
