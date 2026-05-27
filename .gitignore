@@ -1,1 +1,15 @@
-__pycache__/analyzer_gemini.cpython-313.pyc
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment overrides/secrets
+.env
+
+# Generated outputs
+last.wav
+last-synthetic.wav
+results.csv
