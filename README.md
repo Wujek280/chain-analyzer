@@ -55,7 +55,54 @@ python chain_analyser.py --limit 6
 python chain_analyser.py --dir ~/storage/shared/DCIM/Camera
 ```
 
-You can also use environment variables:
+## Example Output
+
+```sh
+╭─u0_a387@localhost ~/storage/documents/chain-analyzer ‹main›
+╰─$ python chain_analyser.py --select 3
+Scanning /data/data/com.termux/files/home/storage/dcim/Camera...
+
+Newest 6 videos:
+[1] PXL_20260527_161036667.mp4
+[2] PXL_20260527_155143765.mp4
+[3] PXL_20260526_175003400~2.mp4
+[4] PXL_20260526_175003400.mp4
+[5] PXL_20260526_173659308.mp4
+[6] PXL_20260503_180603971.mp4
+
+Auto-selected video 3: PXL_20260526_175003400~2.mp4
+
+[1/2] Analyzing: PXL_20260526_175003400~2.mp4
+ -> Band-pass: 3500 Hz to 4500 Hz
+ -> Adaptive ratio: 3.5
+ -> Dumped processed audio to: /storage/emulated/0/Documents/chain-analyzer/last.wav
+[2/2] Results
+==================================================
+Total peaks detected: 40
+1.5 - 2.2s (14 peaks detected)
+
+--- Deceleration intervals (13) ---
+  n12   35 ms  []
+  n11   37 ms  []
+  n10   39 ms  []
+  n9    38 ms  []
+  n8    42 ms  [][]
+  n7    44 ms  [][]
+  n6    48 ms  [][][]
+  n5    50 ms  [][][][]
+  n4    54 ms  [][][][][]
+  n3    61 ms  [][][][][][][]
+  n2    67 ms  [][][][][][][][][]
+  n1    82 ms  [][][][][][][][][][][][][]
+  n0   108 ms  [][][][][][][][][][][][][][][][][][][][]
+
+K-value (last n1..n4): 0.13 (R²=0.975)
+==================================================
+
+```
+
+
+## Environment variables:
 
 ```bash
 export CHAIN_SCAN_DIR=~/storage/shared/DCIM/Camera
