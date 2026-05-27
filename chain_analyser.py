@@ -494,7 +494,6 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
     start_s = decel_peaks[0] / 1000.0
     end_s = decel_peaks[-1] / 1000.0
     print(f"{start_s:.1f} - {end_s:.1f}s ({len(decel_peaks)} peaks detected)")
-    print(f"Peak times (ms): {[int(round(x)) for x in decel_peaks]}")
 
     print(f"\n--- Deceleration intervals ({len(decel_intervals)}) ---")
     bars = render_interval_bars(decel_intervals)
@@ -502,6 +501,7 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
     for idx_from_end, src_idx in enumerate(range(len(decel_intervals) - 1, -1, -1)):
         interval_ms = int(round(decel_intervals[src_idx]))
         indexed_rows.append((f"n{idx_from_end}", interval_ms, bars[src_idx]))
+    indexed_rows.reverse()
     label_width = max((len(label) for label, _, _ in indexed_rows), default=2)
     ms_width = max((len(str(ms)) for _, ms, _ in indexed_rows), default=3)
     for label, interval_ms, bar in indexed_rows:
