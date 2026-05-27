@@ -436,7 +436,7 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
                   band_center=DEFAULT_BAND_CENTER, band_range=DEFAULT_BAND_RANGE,
                   min_peak_distance_ms=MIN_PEAK_DISTANCE_MS,
                   noise_window_ms=NOISE_WINDOW_MS,
-                  cutoff_ms=35, shift_ms=None, save=False, debug=False):
+                  cutoff_ms=35, shift_ms=None, save=False, debug=False, last_n=4):
     """Reverse-scan peak detection: find clicks from the tail backward, extract
     the deceleration phase, and compute the slowdown coefficient."""
     print(f"\n[1/2] Analyzing: {os.path.basename(video_path)}")
@@ -507,24 +507,20 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
     for label, interval_ms, bar in indexed_rows:
         print(f"  {label:<{label_width}}  {interval_ms:>{ms_width}} ms  {bar}")
 
-    # Last 4 intervals — consistent metric regardless of total peak count
-    # Shifted by -1 to drop the unstable final click: uses n-4..n-1 from the end.
-    if len(decel_intervals) >= 5:
-        last4 = decel_intervals[-5:-1]
-    elif len(decel_intervals) >= 2:
-        last4 = decel_intervals[:-1]
-    else:
-        last4 = decel_intervals
-    log_coeff4, log_r2 = compute_log_coefficient(last4)
+    # Fit k on the trailing intervals excluding n0 (the final unstable click gap).
+    fit_source = decel_intervals[:-1] if len(decel_intervals) >= 2 else []
+    fit_intervals = fit_source[-last_n:] if fit_source else []
+    used_n = len(fit_intervals)
+    log_coeff, log_r2 = compute_log_coefficient(fit_intervals)
 
-    if log_coeff4 is not None:
-        print(f"\nK-value (last n1..n4): {log_coeff4:.2f} (R²={log_r2:.3f})")
-    if log_coeff4 is None:
+    if log_coeff is not None:
+        print(f"\nK-value (last n1..n{used_n}): {log_coeff:.2f} (R²={log_r2:.3f})")
+    else:
         print("\n[-] Could not compute deceleration coefficient.")
     print("=" * 50)
 
-    if save and log_coeff4 is not None:
-        save_result_row(log_coeff4)
+    if save and log_coeff is not None:
+        save_result_row(log_coeff)
 
     if debug:
         try:
@@ -615,7 +611,13 @@ def build_parser():
     parser.add_argument(
         "--save",
         action="store_true",
-        help="Append the timestamp, description, and coefficient to results.csv next to the script.",
+        help="Append the timestamp, description, and k-value to results.csv next to the script.",
+    )
+    parser.add_argument(
+        "--last",
+        type=int,
+        default=4,
+        help="How many trailing intervals (excluding n0) to use for k-value fit. Default: 4.",
     )
     parser.add_argument(
         "--debug",
@@ -700,6 +702,7 @@ def main():
         shift_ms=args.shift,
         save=args.save,
         debug=args.debug,
+        last_n=max(1, args.last),
     )
 
 
