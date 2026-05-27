@@ -290,6 +290,38 @@ def compute_coefficient(intervals_ms):
     return mean, math.sqrt(variance)
 
 
+def compute_log_coefficient(intervals_ms):
+    """Linear regression of log(interval) on step index.
+
+    Friction in the deceleration tail makes intervals grow roughly like
+    interval(n) = A * exp(k*n).  Taking log() linearises that, so the slope
+    of log(interval) vs. step index is a stable estimate of the exponential
+    growth rate k.  Returns (k, r_squared); k > 0 means slowing down.
+    """
+    if len(intervals_ms) < 2:
+        return None, None
+    xs, ys = [], []
+    for i, interval in enumerate(intervals_ms):
+        if interval > 0:
+            xs.append(float(i))
+            ys.append(math.log(interval))
+    if len(ys) < 2:
+        return None, None
+    n = len(ys)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    den = sum((x - mean_x) ** 2 for x in xs)
+    if den == 0:
+        return None, None
+    slope = num / den
+    intercept = mean_y - slope * mean_x
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    ss_tot = sum((y - mean_y) ** 2 for y in ys)
+    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    return slope, r_squared
+
+
 # ---------------------------------------------------------------------------
 #  Single-pass analysis
 # ---------------------------------------------------------------------------
@@ -376,17 +408,22 @@ def dump_synthetic_audio(peak_times_ms, duration_ms):
     print(f" -> Dumped synthetic debug audio to: {LAST_SYNTHETIC_PATH}")
 
 
-def save_result_row(coefficient):
-    """Append a timestamp, description, and coefficient to the CSV log."""
+def save_result_row(coefficient, log_coefficient=None):
+    """Append a timestamp, description, and coefficients to the CSV log."""
     description = input("Enter short description for this run: ").strip()
     timestamp = datetime.now().isoformat(timespec="seconds")
-    row = [timestamp, description, "" if coefficient is None else f"{coefficient:.4f}"]
+    row = [
+        timestamp,
+        description,
+        "" if coefficient is None else f"{coefficient:.4f}",
+        "" if log_coefficient is None else f"{log_coefficient:.4f}",
+    ]
 
     file_exists = os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         if not file_exists:
-            writer.writerow(["timestamp", "description", "coefficient"])
+            writer.writerow(["timestamp", "description", "coefficient", "log_coefficient"])
         writer.writerow(row)
 
     print(f" -> Saved CSV row to: {CSV_PATH}")
@@ -466,19 +503,30 @@ def analyze_video(video_path, chunk_ms, ratio, normalize=False,
         print(f"  {int(round(interval)):4d} ms {bar}")
 
     # Last 4 intervals — consistent metric regardless of total peak count
-    last4 = decel_intervals[-4:] if len(decel_intervals) >= 4 else decel_intervals
+    # Shifted by -1 to drop the unstable final click: uses n-4..n-1 from the end.
+    if len(decel_intervals) >= 5:
+        last4 = decel_intervals[-5:-1]
+    elif len(decel_intervals) >= 2:
+        last4 = decel_intervals[:-1]
+    else:
+        last4 = decel_intervals
     coeff4, stdev4 = compute_coefficient(last4)
+    log_coeff4, log_r2 = compute_log_coefficient(last4)
 
     if coeff is not None:
-        print(f"\nDeceleration (all):    {coeff * 100:.2f}% \u00b1 {stdev * 100:.2f}% per step")
+        print(f"\nDeceleration (all):      {coeff * 100:.2f}% \u00b1 {stdev * 100:.2f}% per step")
     if coeff4 is not None:
-        print(f"Deceleration (last 4): {coeff4 * 100:.2f}% \u00b1 {stdev4 * 100:.2f}% per step")
-    if coeff is None and coeff4 is None:
+        print(f"Deceleration (n-4..n-1): {coeff4 * 100:.2f}% \u00b1 {stdev4 * 100:.2f}% per step (linear)")
+    if log_coeff4 is not None:
+        growth_pct = (math.exp(log_coeff4) - 1) * 100
+        print(f"Deceleration (n-4..n-1): k={log_coeff4:.4f}, "
+              f"{growth_pct:.2f}% per step (log fit, R\u00b2={log_r2:.3f})")
+    if coeff is None and coeff4 is None and log_coeff4 is None:
         print("\n[-] Could not compute deceleration coefficient.")
     print("=" * 50)
 
-    if save and coeff4 is not None:
-        save_result_row(coeff4)
+    if save and (coeff4 is not None or log_coeff4 is not None):
+        save_result_row(coeff4, log_coeff4)
 
     if debug:
         try:
